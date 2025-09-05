@@ -1,0 +1,114 @@
+name: Terraform template sync
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_name:
+        description: "Name for the PR and commit message"
+        required: true
+        type: string
+      target_branch:
+        description: "Target branch to sync template changes to"
+        required: true
+        default: "development"
+        type: choice
+        options:
+          - development
+          - production
+
+jobs:
+  sync-template:
+    name: "Template Sync"
+    runs-on: ${{ vars.SELFHOSTED_LINUX_RUNNER }}
+    environment: ${{ github.event.inputs.target_branch == 'development' && 'dev' || 'prd' }}
+    
+    steps:
+      - name: Check Out Repository
+        id: checkout_repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Adding node
+        id: add_node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          check-latest: true
+      
+      - name: Create feature branch from target branch
+        id: create_branch
+        run: |
+          # Set branch name based on target branch
+          target="${{ github.event.inputs.target_branch }}"
+          timestamp=$(date +%Y%m%d%H%M%S)
+          
+          # Checkout target branch
+          git checkout $target
+          git pull origin $target
+          
+          # Create feature branch
+          feature_branch="feature/sync-${target}-${timestamp}"
+          git checkout -b $feature_branch
+          echo "FEATURE_BRANCH=$feature_branch" >> $GITHUB_ENV
+          
+          # Configure Git
+          git config user.name "GitHub Actions"
+          git config user.email "github-actions@github.com"
+      
+      - name: Merge template changes
+        id: merge_template
+        continue-on-error: true
+        run: |
+          # Fetch and merge template branch
+          git fetch origin template:template
+          git merge template --no-commit
+          
+          # Check for changes
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            echo "HAS_CHANGES=false" >> $GITHUB_ENV
+          else
+            echo "Changes detected"
+            echo "HAS_CHANGES=true" >> $GITHUB_ENV
+          fi
+      
+      - name: Handle merge failure
+        if: steps.merge_template.outcome == 'failure'
+        run: |
+          echo "::error::Merge conflicts detected! Manual resolution required."
+          git merge --abort
+          exit 1
+      
+      - name: Commit and push changes
+        if: env.HAS_CHANGES == 'true'
+        run: |
+          git commit -m "${{ github.event.inputs.pr_name }}"
+          git push origin ${{ env.FEATURE_BRANCH }}
+      
+      - name: Create Pull Request
+        if: env.HAS_CHANGES == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { repo, owner } = context.repo;
+            
+            await github.rest.pulls.create({
+              owner,
+              repo,
+              title: "${{ github.event.inputs.pr_name }}",
+              body: `## Template Synchronization
+              
+              This PR syncs latest template changes into the ${{ github.event.inputs.target_branch }} branch.
+              
+              **Created by:** GitHub Actions workflow
+              **Source:** template branch`,
+              head: "${{ env.FEATURE_BRANCH }}",
+              base: "${{ github.event.inputs.target_branch }}"
+            });
+      
+      - name: No changes detected
+        if: env.HAS_CHANGES == 'false'
+        run: echo "No changes found to sync from template to ${{ github.event.inputs.target_branch }}."
