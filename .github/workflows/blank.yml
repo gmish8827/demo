@@ -1,14 +1,19 @@
-name: Sync Template to Multiple Environments
+name: Sync Template to Environments
 
 on:
   workflow_dispatch:
     inputs:
-      commit_message:
-        description: 'Commit message for the sync operation'
+      environments:
+        description: 'Environments to sync with (comma-separated)'
         required: true
-        type: string
+        type: choice
+        options:
+          - DEV
+          - PRD
+          - DEV,PRD
+        default: 'DEV,PRD'
       pr_title:
-        description: 'Title for the Pull Request (will be appended with environment name)'
+        description: 'Title for the Pull Request (will also be used as commit message)'
         required: true
         type: string
       feature_branch_name:
@@ -25,7 +30,7 @@ jobs:
       pull-requests: write
     strategy:
       matrix:
-        target_environment: [DEV, PRD]
+        target_environment: ${{ fromJSON(format('[{0}]', join(',', map(split(github.event.inputs.environments, ','), env => format('"{0}"', env))))) }}
     name: Sync to ${{ matrix.target_environment }}
 
     steps:
@@ -86,7 +91,7 @@ jobs:
           else
             echo "Changes detected, committing"
             git add .
-            git commit -m "${{ github.event.inputs.commit_message }}"
+            git commit -m "${{ github.event.inputs.pr_title }}"
           fi
 
       - name: Push feature branch
