@@ -8,8 +8,8 @@ on:
         required: true
         type: choice
         options:
-          - development
-          - production
+          - DEV
+          - PRD
       commit_message:
         description: 'Commit message for the sync operation'
         required: true
