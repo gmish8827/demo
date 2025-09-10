@@ -1,25 +1,18 @@
-name: Sync Template to Environment
+name: Sync Template to Multiple Environments
 
 on:
   workflow_dispatch:
     inputs:
-      target_environment:
-        description: 'Target environment to sync with'
-        required: true
-        type: choice
-        options:
-          - DEV
-          - PRD
       commit_message:
         description: 'Commit message for the sync operation'
         required: true
         type: string
       pr_title:
-        description: 'Title for the Pull Request'
+        description: 'Title for the Pull Request (will be appended with environment name)'
         required: true
         type: string
       feature_branch_name:
-        description: 'Name for the feature branch (optional)'
+        description: 'Base name for the feature branch (optional)'
         required: false
         type: string
         default: 'sync/template-updates'
@@ -30,13 +23,17 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+    strategy:
+      matrix:
+        target_environment: [DEV, PRD]
+    name: Sync to ${{ matrix.target_environment }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.PAT_TOKEN }}
 
       - name: Setup Git
         run: |
@@ -46,14 +43,25 @@ jobs:
       - name: Determine branch names
         run: |
           echo "TEMPLATE_BRANCH=main" >> $GITHUB_ENV
-          echo "TARGET_BRANCH=${{ github.event.inputs.target_environment }}" >> $GITHUB_ENV
-          echo "FEATURE_BRANCH=feature/${{ github.event.inputs.feature_branch_name }}-to-${{ github.event.inputs.target_environment }}" >> $GITHUB_ENV
+          echo "TARGET_BRANCH=${{ matrix.target_environment }}" >> $GITHUB_ENV
+          echo "FEATURE_BRANCH=feature/${{ github.event.inputs.feature_branch_name }}-to-${{ matrix.target_environment }}" >> $GITHUB_ENV
 
       - name: Create and switch to feature branch
         run: |
           git fetch --all
           git checkout ${{ env.TARGET_BRANCH }}
           git pull origin ${{ env.TARGET_BRANCH }}
+          
+          # Check if branch already exists and delete it
+          if git show-ref --quiet refs/heads/${{ env.FEATURE_BRANCH }}; then
+            git branch -D ${{ env.FEATURE_BRANCH }}
+          fi
+          
+          # Check if remote branch exists and delete it
+          if git ls-remote --exit-code --heads origin ${{ env.FEATURE_BRANCH }}; then
+            git push origin --delete ${{ env.FEATURE_BRANCH }} || true
+          fi
+          
           git checkout -b ${{ env.FEATURE_BRANCH }}
 
       - name: Merge template branch
@@ -84,23 +92,37 @@ jobs:
       - name: Push feature branch
         if: env.NO_CHANGES != 'true'
         run: |
-          git push origin ${{ env.FEATURE_BRANCH }}
+          git push --force origin ${{ env.FEATURE_BRANCH }}
 
       - name: Create Pull Request
         if: env.NO_CHANGES != 'true'
         uses: actions/github-script@v6
         with:
+          github-token: ${{ secrets.PAT_TOKEN }}
           script: |
-            github.rest.pulls.create({
+            // Check if PR already exists for this branch
+            const prs = await github.rest.pulls.list({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: '${{ github.event.inputs.pr_title }}',
-              head: '${{ env.FEATURE_BRANCH }}',
-              base: '${{ env.TARGET_BRANCH }}',
-              body: 'Automated PR: Syncing template updates to ${{ env.TARGET_BRANCH }} branch\n\n' +
-                    'This PR was automatically generated to sync the latest changes from the template branch.' +
-                    '\n\nPlease review the changes before merging.'
-            })
+              head: context.repo.owner + ':' + '${{ env.FEATURE_BRANCH }}',
+              state: 'open'
+            });
+            
+            if (prs.data.length === 0) {
+              // Create new PR if one doesn't exist
+              await github.rest.pulls.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: '${{ github.event.inputs.pr_title }} - ${{ matrix.target_environment }}',
+                head: '${{ env.FEATURE_BRANCH }}',
+                base: '${{ env.TARGET_BRANCH }}',
+                body: 'Automated PR: Syncing template updates to ${{ env.TARGET_BRANCH }} branch\n\n' +
+                      'This PR was automatically generated to sync the latest changes from the template branch.' +
+                      '\n\nPlease review the changes before merging.'
+              });
+            } else {
+              console.log('PR already exists for this branch: ' + prs.data[0].html_url);
+            }
 
       - name: No changes detected
         if: env.NO_CHANGES == 'true'
