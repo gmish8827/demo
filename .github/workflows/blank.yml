@@ -1,74 +1,108 @@
-name: Sync Template Changes
+name: Sync Template to Environment
 
 on:
   workflow_dispatch:
     inputs:
-      pr_name:
-        description: 'Name for the PR and commit'
-        required: true
-        type: string
-      target_branch:
-        description: 'Target branch to create feature branch from'
+      target_environment:
+        description: 'Target environment to sync with'
         required: true
         type: choice
         options:
-        - DEV
-        - PRD
+          - DEV
+          - PRD
+      commit_message:
+        description: 'Commit message for the sync operation'
+        required: true
+        type: string
+      pr_title:
+        description: 'Title for the Pull Request'
+        required: true
+        type: string
+      feature_branch_name:
+        description: 'Name for the feature branch (optional)'
+        required: false
+        type: string
+        default: 'sync/template-updates'
 
 jobs:
-  sync-template-changes:
+  sync-template:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Configure Git
+      - name: Setup Git
         run: |
-          git config --global user.name "GitHub Actions"
-          git config --global user.email "github-actions@github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Create feature branch from target branch
+      - name: Determine branch names
         run: |
-          # Fetch all branches
-          git fetch origin
-          # Checkout target branch
-          git checkout ${{ github.event.inputs.target_branch }}
-          git pull origin ${{ github.event.inputs.target_branch }}
-          # Create and checkout feature branch
-          feature_branch="feature/sync/${{ github.event.inputs.target_branch }}"
-          git checkout -b $feature_branch
+          echo "TEMPLATE_BRANCH=main" >> $GITHUB_ENV
+          echo "TARGET_BRANCH=${{ github.event.inputs.target_environment }}" >> $GITHUB_ENV
+          echo "FEATURE_BRANCH=feature/${{ github.event.inputs.feature_branch_name }}-to-${{ github.event.inputs.target_environment }}" >> $GITHUB_ENV
 
-      - name: Merge changes from temp branch
+      - name: Create and switch to feature branch
         run: |
-          # Merge temp branch into feature branch
-          git merge origin/temp --no-commit --no-ff
-          # If there are merge conflicts, we'll need manual intervention
-          if [ $? -ne 0 ]; then
-            echo "Merge conflicts detected! Please resolve them manually."
-            exit 1
+          git fetch --all
+          git checkout ${{ env.TARGET_BRANCH }}
+          git pull origin ${{ env.TARGET_BRANCH }}
+          git checkout -b ${{ env.FEATURE_BRANCH }}
+
+      - name: Merge template branch
+        run: |
+          # Try to merge template branch
+          if git merge origin/${{ env.TEMPLATE_BRANCH }} --no-commit; then
+            echo "Merge successful"
+          else
+            echo "Merge conflicts detected - attempting to resolve"
+            # Try to auto-resolve conflicts by preferring template changes
+            git checkout --theirs -- .
+            git add .
+            git commit -m "Merge template with conflicts resolved" || true
           fi
 
-      - name: Commit and push changes
+      - name: Commit merged changes
         run: |
-          feature_branch="feature/sync/${{ github.event.inputs.target_branch }}"
-          # Commit changes
-          git add .
-          git commit -m "${{ github.event.inputs.pr_name }}"
-          # Push feature branch
-          git push origin $feature_branch
+          # Check if there are changes to commit
+          if git diff --cached --quiet && git diff --quiet; then
+            echo "No changes to commit"
+            echo "NO_CHANGES=true" >> $GITHUB_ENV
+          else
+            echo "Changes detected, committing"
+            git add .
+            git commit -m "${{ github.event.inputs.commit_message }}"
+          fi
+
+      - name: Push feature branch
+        if: env.NO_CHANGES != 'true'
+        run: |
+          git push origin ${{ env.FEATURE_BRANCH }}
 
       - name: Create Pull Request
-        uses: peter-evans/create-pull-request@v5
+        if: env.NO_CHANGES != 'true'
+        uses: actions/github-script@v6
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          title: "${{ github.event.inputs.pr_name }}"
-          body: |
-            This PR syncs changes from the template repository into ${{ github.event.inputs.target_branch }}.
-            
-            Changes are from the temp branch.
-          branch: feature/sync/${{ github.event.inputs.target_branch }}
-          base: ${{ github.event.inputs.target_branch }}
-          draft: false
+          script: |
+            github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '${{ github.event.inputs.pr_title }}',
+              head: '${{ env.FEATURE_BRANCH }}',
+              base: '${{ env.TARGET_BRANCH }}',
+              body: 'Automated PR: Syncing template updates to ${{ env.TARGET_BRANCH }} branch\n\n' +
+                    'This PR was automatically generated to sync the latest changes from the template branch.' +
+                    '\n\nPlease review the changes before merging.'
+            })
+
+      - name: No changes detected
+        if: env.NO_CHANGES == 'true'
+        run: |
+          echo "No changes detected between template and ${{ env.TARGET_BRANCH }} branches"
