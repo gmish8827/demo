@@ -1,0 +1,74 @@
+name: Sync Template Changes
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_name:
+        description: 'Name for the PR and commit'
+        required: true
+        type: string
+      target_branch:
+        description: 'Target branch to create feature branch from'
+        required: true
+        type: choice
+        options:
+        - DEV
+        - PRD
+
+jobs:
+  sync-template-changes:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "github-actions@github.com"
+
+      - name: Create feature branch from target branch
+        run: |
+          # Fetch all branches
+          git fetch origin
+          # Checkout target branch
+          git checkout ${{ github.event.inputs.target_branch }}
+          git pull origin ${{ github.event.inputs.target_branch }}
+          # Create and checkout feature branch
+          feature_branch="feature/sync/${{ github.event.inputs.target_branch }}"
+          git checkout -b $feature_branch
+
+      - name: Merge changes from temp branch
+        run: |
+          # Merge temp branch into feature branch
+          git merge origin/temp --no-commit --no-ff
+          # If there are merge conflicts, we'll need manual intervention
+          if [ $? -ne 0 ]; then
+            echo "Merge conflicts detected! Please resolve them manually."
+            exit 1
+          fi
+
+      - name: Commit and push changes
+        run: |
+          feature_branch="feature/sync/${{ github.event.inputs.target_branch }}"
+          # Commit changes
+          git add .
+          git commit -m "${{ github.event.inputs.pr_name }}"
+          # Push feature branch
+          git push origin $feature_branch
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          title: "${{ github.event.inputs.pr_name }}"
+          body: |
+            This PR syncs changes from the template repository into ${{ github.event.inputs.target_branch }}.
+            
+            Changes are from the temp branch.
+          branch: feature/sync/${{ github.event.inputs.target_branch }}
+          base: ${{ github.event.inputs.target_branch }}
+          draft: false
